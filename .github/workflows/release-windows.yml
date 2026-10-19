@@ -1,24 +1,24 @@
-name: BoltSDR — Windows Build & Release
+name: rigflow — Windows Build & Release
 
-# Builds rigflow-client for Windows x86-64 after applying BoltSDR patches
-# (strips RTL-SDR, HardRock-50, and Linux serial dependencies).
+# Builds rigflow-client for Windows x86-64 after applying patches that
+# strip RTL-SDR, HardRock-50, and Linux serial dependencies.
 #
 # Produces two artefacts per run:
-#   • BoltSDR-Setup-<ver>.exe      — Inno Setup installer (per-user, no UAC)
-#   • BoltSDR-Portable-<ver>.zip   — portable ZIP, just unzip and run
+#   • rigflow-Setup-<ver>.exe      — Inno Setup installer (per-user, no UAC)
+#   • rigflow-Portable-<ver>.zip   — portable ZIP, just unzip and run
 #
 # Trigger
 # -------
-# Push a tag starting with "vBolt-"  →  full build + draft GitHub Release
-# workflow_dispatch                  →  build only (no release published)
+# Push a tag starting with "v" followed by Windows:  vWindows-1.1.1
+# workflow_dispatch                                 → build only (no release)
 #
 # Tagging example:
-#   git tag vBolt-1.1.1
-#   git push origin vBolt-1.1.1
+#   git tag vWindows-1.1.1
+#   git push origin vWindows-1.1.1
 
 on:
   push:
-    tags: ["vBolt-*"]
+    tags: ["vWindows-*"]
   workflow_dispatch:
 
 permissions:
@@ -26,7 +26,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Upstream commit to build against. Update this when rebasing on a newer
+  APP_VERSION: "1.1.1"
+  # Upstream commit to build against. Update when rebasing on a newer
   # pe5jw/rigflow commit and re-verifying the patches still apply cleanly.
   UPSTREAM_REF: c342f2f0bb7608f4788064ff7eb32003375932da
 
@@ -39,8 +40,8 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # We check out THIS repo (the fork / your own repo that holds the tools).
-      - name: Checkout this repo (tools + installer)
+      # Check out THIS repo (holds tools/ and installer/).
+      - name: Checkout this repo
         uses: actions/checkout@v4
         with:
           path: tools-repo
@@ -53,13 +54,12 @@ jobs:
           ref: ${{ env.UPSTREAM_REF }}
           path: rigflow-src
 
-      # Apply the BoltSDR patches from this repo's tools/ directory.
-      - name: Apply BoltSDR patches
+      # Apply the patches from tools/apply_patches.py
+      - name: Apply patches (remove RTL-SDR, HardRock, serial)
         shell: pwsh
         run: python tools-repo/tools/apply_patches.py rigflow-src
 
-      # Verify the patch left no stray RTL / HR50 references that would cause
-      # a compile error on Windows.
+      # Verify no stray forbidden references remain.
       - name: Sanity-check patches
         shell: pwsh
         run: |
@@ -87,8 +87,7 @@ jobs:
           restore-keys: windows-cargo-
 
       # rigflow-client on Windows uses cpal (WASAPI) — no extra system libs needed.
-      # rigflow-server is intentionally skipped: it targets Linux/Pi and would
-      # require libusb even after the RTL-SDR removal.
+      # rigflow-server is intentionally skipped: it targets Linux/Pi.
       - name: Build rigflow-client (dist profile)
         working-directory: rigflow-src
         run: cargo build --profile dist -p rigflow-client
@@ -100,50 +99,47 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
-      # Copy the installer script next to the source tree so relative paths
-      # (../target/dist, ../README.md …) resolve correctly.
-      - name: Copy installer script
+      - name: Copy installer script into source tree
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force rigflow-src\installer | Out-Null
-          Copy-Item tools-repo\installer\BoltSDR.iss rigflow-src\installer\BoltSDR.iss
+          Copy-Item tools-repo\installer\rigflow-windows.iss `
+                    rigflow-src\installer\rigflow-windows.iss
 
-      - name: Build installer with Inno Setup
+      - name: Build installer
         shell: pwsh
         working-directory: rigflow-src
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $iscc installer\BoltSDR.iss
+          & $iscc installer\rigflow-windows.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # -----------------------------------------------------------------------
-      # Portable ZIP  (built separately so it is always produced, even if the
-      # Inno Setup [Code] section path is skipped in a non-interactive run)
+      # Portable ZIP
       # -----------------------------------------------------------------------
       - name: Build portable ZIP
         shell: pwsh
         run: |
-          $ver     = "1.1.1"
-          $binDir  = "rigflow-src\target\dist"
-          $outDir  = "rigflow-src\installer\Output"
-          $zipName = "BoltSDR-Portable-$ver.zip"
-          $tmpDir  = "$env:TEMP\BoltSDR-Portable-$ver"
+          $ver    = "${{ env.APP_VERSION }}"
+          $binDir = "rigflow-src\target\dist"
+          $outDir = "rigflow-src\installer\Output"
+          $zip    = "rigflow-Portable-$ver.zip"
+          $tmp    = "$env:TEMP\rigflow-Portable-$ver"
 
           New-Item -ItemType Directory -Force $outDir | Out-Null
-          Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory $tmpDir | Out-Null
+          Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory $tmp | Out-Null
 
-          Copy-Item "$binDir\rigflow-client.exe" $tmpDir
-          Copy-Item "rigflow-src\README.md"      $tmpDir
-          Copy-Item "rigflow-src\LICENSE"         $tmpDir
-          Copy-Item "rigflow-src\DISCLAIMER.md"  $tmpDir
+          Copy-Item "$binDir\rigflow-client.exe"  $tmp
+          Copy-Item "rigflow-src\README.md"        $tmp
+          Copy-Item "rigflow-src\LICENSE"          $tmp
+          Copy-Item "rigflow-src\DISCLAIMER.md"   $tmp
 
-          Compress-Archive -Path "$tmpDir\*" `
-                           -DestinationPath "$outDir\$zipName" -Force
-          Remove-Item $tmpDir -Recurse -Force
+          Compress-Archive -Path "$tmp\*" -DestinationPath "$outDir\$zip" -Force
+          Remove-Item $tmp -Recurse -Force
 
-          Write-Host "Portable ZIP: $outDir\$zipName"
-          Get-Item "$outDir\$zipName" | Select-Object Name, Length
+          Write-Host "Portable ZIP: $outDir\$zip"
+          Get-Item "$outDir\$zip" | Select-Object Name, Length
 
       # -----------------------------------------------------------------------
       # Checksums
@@ -160,37 +156,37 @@ jobs:
           Get-Content SHA256SUMS
 
       # -----------------------------------------------------------------------
-      # Upload build artefacts
+      # Upload artefacts
       # -----------------------------------------------------------------------
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: BoltSDR-Installer
-          path: rigflow-src\installer\Output\BoltSDR-Setup-*.exe
+          name: rigflow-Installer
+          path: rigflow-src\installer\Output\rigflow-Setup-*.exe
           if-no-files-found: error
 
       - name: Upload portable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: BoltSDR-Portable
-          path: rigflow-src\installer\Output\BoltSDR-Portable-*.zip
+          name: rigflow-Portable
+          path: rigflow-src\installer\Output\rigflow-Portable-*.zip
           if-no-files-found: error
 
       - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
-          name: BoltSDR-SHA256SUMS
+          name: rigflow-SHA256SUMS
           path: rigflow-src\installer\Output\SHA256SUMS
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # 2. Publish (only for vBolt-* tags)
+  # 2. Publish (only for vWindows-* tags)
   # ---------------------------------------------------------------------------
   publish:
     name: Publish draft release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/vBolt-')
+    if: startsWith(github.ref, 'refs/tags/vWindows-')
 
     steps:
       - name: Download all artefacts
@@ -203,38 +199,38 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          name: "BoltSDR ${{ github.ref_name }}"
+          name: "rigflow ${{ github.ref_name }} — Windows"
           body: |
-            ## BoltSDR ${{ github.ref_name }} — Windows
+            ## rigflow ${{ github.ref_name }} — Windows
 
-            HPSDR / HermesLite2 SDR client for Windows, built from
+            HPSDR / HermesLite2 SDR client for Windows x86-64, built from
             [pe5jw/rigflow](https://github.com/pe5jw/rigflow) @ `${{ env.UPSTREAM_REF }}`.
 
             ### Downloads
 
             | File | Description |
             |---|---|
-            | `BoltSDR-Setup-*.exe` | **Installer** — per-user install, no UAC needed |
-            | `BoltSDR-Portable-*.zip` | **Portable** — unzip anywhere and run |
-            | `SHA256SUMS` | Checksums to verify your download |
+            | `rigflow-Setup-*.exe` | **Installer** — per-user install, geen UAC nodig |
+            | `rigflow-Portable-*.zip` | **Portable** — uitpakken en starten |
+            | `SHA256SUMS` | Checksums |
 
-            ### Changes vs upstream rigflow
+            ### Aanpassingen ten opzichte van upstream
 
-            - ✂️ RTL-SDR support removed (no libusb dependency)
-            - ✂️ HardRock-50 amplifier / serial removed
-            - ✂️ Linux-only `libc` serial code removed
+            - ✂️ RTL-SDR verwijderd (geen libusb dependency)
+            - ✂️ HardRock-50 versterker / serial verwijderd
+            - ✂️ Linux-only `libc` serial code verwijderd
             - ✅ Windows WASAPI audio via `cpal`
-            - ✅ HermesLite2 (OpenHPSDR), WAV-file, and fake-tone sources retained
+            - ✅ HermesLite2 (OpenHPSDR), WAV-bestand en fake-tone bronnen behouden
 
-            ### First run
+            ### Eerste gebruik
 
-            The client connects to a rigflow-server (Linux/Raspberry Pi) over your
-            local network. Start the server first:
+            De client verbindt met een rigflow-server (Linux / Raspberry Pi) over
+            het lokale netwerk. Start de server eerst:
             ```
             rigflow-server --source hl2
             ```
-            Then launch BoltSDR on Windows and enter the server's IP address.
+            Start dan rigflow op Windows en voer het IP-adres van de server in.
           files: |
-            artifacts/BoltSDR-Setup-*.exe
-            artifacts/BoltSDR-Portable-*.zip
+            artifacts/rigflow-Setup-*.exe
+            artifacts/rigflow-Portable-*.zip
             artifacts/SHA256SUMS

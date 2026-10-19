@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-tools/apply_patches.py — BoltSDR source patches for pe5jw/rigflow
-===================================================================
+tools/apply_patches.py — Windows build patches for pe5jw/rigflow
+=================================================================
 
 Strips RTL-SDR, HardRock-50 amplifier, and Linux serial-port code from
 the rigflow-server source so it compiles cleanly on Windows (MSVC) without
@@ -189,7 +189,7 @@ def apply(root):
         )
     write_stub(
         os.path.join(server, "src", "amplifier", "mod.rs"),
-        "// HardRock-50 amplifier support removed in BoltSDR build.\n"
+        "// HardRock-50 amplifier support removed for the Windows build.\n"
         "// Kept as empty stub so existing mod-path references compile.\n",
         "amplifier mod emptied",
     )
@@ -205,5 +205,5 @@ if __name__ == "__main__":
     if not os.path.isdir(root):
         print(f"Error: {root!r} is not a directory")
         sys.exit(1)
-    print(f"Applying BoltSDR patches to: {os.path.abspath(root)}\n")
+    print(f"Applying rigflow Windows patches to: {os.path.abspath(root)}\n")
     apply(root)
