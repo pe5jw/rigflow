@@ -1,0 +1,236 @@
+name: rigflow — Windows Build & Release
+
+# Builds rigflow-client for Windows x86-64 after applying patches that
+# strip RTL-SDR, HardRock-50, and Linux serial dependencies.
+#
+# Produces two artefacts per run:
+#   • rigflow-Setup-<ver>.exe      — Inno Setup installer (per-user, no UAC)
+#   • rigflow-Portable-<ver>.zip   — portable ZIP, just unzip and run
+#
+# Trigger
+# -------
+# Push a tag starting with "v" followed by Windows:  vWindows-1.1.1
+# workflow_dispatch                                 → build only (no release)
+#
+# Tagging example:
+#   git tag vWindows-1.1.1
+#   git push origin vWindows-1.1.1
+
+on:
+  push:
+    tags: ["vWindows-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_VERSION: "1.1.1"
+  # Upstream commit to build against. Update when rebasing on a newer
+  # pe5jw/rigflow commit and re-verifying the patches still apply cleanly.
+  UPSTREAM_REF: c342f2f0bb7608f4788064ff7eb32003375932da
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Build
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Windows x86-64
+    runs-on: windows-latest
+
+    steps:
+      # Check out THIS repo (holds tools/ and installer/).
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: tools-repo
+
+      # Check out the upstream rigflow at the pinned commit.
+      - name: Checkout upstream pe5jw/rigflow
+        uses: actions/checkout@v4
+        with:
+          repository: pe5jw/rigflow
+          ref: ${{ env.UPSTREAM_REF }}
+          path: rigflow-src
+
+      # Apply the patches from tools/apply_patches.py
+      - name: Apply patches (remove RTL-SDR, HardRock, serial)
+        shell: pwsh
+        run: python tools-repo/tools/apply_patches.py rigflow-src
+
+      # Verify no stray forbidden references remain.
+      - name: Sanity-check patches
+        shell: pwsh
+        run: |
+          $bad = Select-String -Path rigflow-src/rigflow-server/Cargo.toml `
+                   -Pattern 'rtl-sdr-rs|^libc\s*=' -Quiet
+          if ($bad) { Write-Error "Patch incomplete: forbidden dep still present"; exit 1 }
+          if (Test-Path rigflow-src/rigflow-server/src/source/rtlsdr.rs) {
+            Write-Error "rtlsdr.rs should have been deleted"; exit 1
+          }
+          Write-Host "Patch sanity check passed."
+
+      - name: Install Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rigflow-src/target
+          key: windows-cargo-${{ hashFiles('rigflow-src/**/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      # rigflow-client on Windows uses cpal (WASAPI) — no extra system libs needed.
+      # rigflow-server is intentionally skipped: it targets Linux/Pi.
+      - name: Build rigflow-client (dist profile)
+        working-directory: rigflow-src
+        run: cargo build --profile dist -p rigflow-client
+
+      # -----------------------------------------------------------------------
+      # Installer (Inno Setup)
+      # -----------------------------------------------------------------------
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Copy installer script into source tree
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force rigflow-src\installer | Out-Null
+          Copy-Item tools-repo\installer\rigflow-windows.iss `
+                    rigflow-src\installer\rigflow-windows.iss
+
+      - name: Build installer
+        shell: pwsh
+        working-directory: rigflow-src
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc installer\rigflow-windows.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # -----------------------------------------------------------------------
+      # Portable ZIP
+      # -----------------------------------------------------------------------
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          $ver    = "${{ env.APP_VERSION }}"
+          $binDir = "rigflow-src\target\dist"
+          $outDir = "rigflow-src\installer\Output"
+          $zip    = "rigflow-Portable-$ver.zip"
+          $tmp    = "$env:TEMP\rigflow-Portable-$ver"
+
+          New-Item -ItemType Directory -Force $outDir | Out-Null
+          Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory $tmp | Out-Null
+
+          Copy-Item "$binDir\rigflow-client.exe"  $tmp
+          Copy-Item "rigflow-src\README.md"        $tmp
+          Copy-Item "rigflow-src\LICENSE"          $tmp
+          Copy-Item "rigflow-src\DISCLAIMER.md"   $tmp
+
+          Compress-Archive -Path "$tmp\*" -DestinationPath "$outDir\$zip" -Force
+          Remove-Item $tmp -Recurse -Force
+
+          Write-Host "Portable ZIP: $outDir\$zip"
+          Get-Item "$outDir\$zip" | Select-Object Name, Length
+
+      # -----------------------------------------------------------------------
+      # Checksums
+      # -----------------------------------------------------------------------
+      - name: Generate SHA256SUMS
+        shell: pwsh
+        working-directory: rigflow-src\installer\Output
+        run: |
+          $hashes = Get-ChildItem -File | ForEach-Object {
+            $hash = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          }
+          $hashes | Tee-Object -FilePath SHA256SUMS
+          Get-Content SHA256SUMS
+
+      # -----------------------------------------------------------------------
+      # Upload artefacts
+      # -----------------------------------------------------------------------
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: rigflow-Installer
+          path: rigflow-src\installer\Output\rigflow-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: rigflow-Portable
+          path: rigflow-src\installer\Output\rigflow-Portable-*.zip
+          if-no-files-found: error
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: rigflow-SHA256SUMS
+          path: rigflow-src\installer\Output\SHA256SUMS
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2. Publish (only for vWindows-* tags)
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish draft release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/vWindows-')
+
+    steps:
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: "rigflow ${{ github.ref_name }} — Windows"
+          body: |
+            ## rigflow ${{ github.ref_name }} — Windows
+
+            HPSDR / HermesLite2 SDR client for Windows x86-64, built from
+            [pe5jw/rigflow](https://github.com/pe5jw/rigflow) @ `${{ env.UPSTREAM_REF }}`.
+
+            ### Downloads
+
+            | File | Description |
+            |---|---|
+            | `rigflow-Setup-*.exe` | **Installer** — per-user install, geen UAC nodig |
+            | `rigflow-Portable-*.zip` | **Portable** — uitpakken en starten |
+            | `SHA256SUMS` | Checksums |
+
+            ### Aanpassingen ten opzichte van upstream
+
+            - ✂️ RTL-SDR verwijderd (geen libusb dependency)
+            - ✂️ HardRock-50 versterker / serial verwijderd
+            - ✂️ Linux-only `libc` serial code verwijderd
+            - ✅ Windows WASAPI audio via `cpal`
+            - ✅ HermesLite2 (OpenHPSDR), WAV-bestand en fake-tone bronnen behouden
+
+            ### Eerste gebruik
+
+            De client verbindt met een rigflow-server (Linux / Raspberry Pi) over
+            het lokale netwerk. Start de server eerst:
+            ```
+            rigflow-server --source hl2
+            ```
+            Start dan rigflow op Windows en voer het IP-adres van de server in.
+          files: |
+            artifacts/rigflow-Setup-*.exe
+            artifacts/rigflow-Portable-*.zip
+            artifacts/SHA256SUMS
